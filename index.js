@@ -7,9 +7,9 @@
  * - Moderation (kick/ban/purge)
  * - Vouches (PUBLIC): /vouch, /checkvouch
  * - Bug system (channel-based):
- *    - Reads messages in a configured Bug Input Channel
- *    - Replies "Saved" + reacts ✅
- *    - Maintains a Bug Board (single message) in another channel
+ *    - Reads messages in Bug Input Channel
+ *    - Reacts ✅ + replies "Saved"
+ *    - Maintains Bug Board (single message) in another channel
  *    - Staff can update status; on RESOLVED tags the reporter
  * - Improved Panel (everyone can interact): buttons + modal
  *
@@ -68,29 +68,6 @@ app.listen(PORT, () => console.log(`[WEB] Listening on :${PORT}`));
 // ---------------------------
 // In-memory storage
 // ---------------------------
-/**
- * guildSettings: Map<guildId, {
- *   welcome_channel_id, welcome_message,
- *   log_channel_id,
- *   ticket_category_id, ticket_counter,
- *   bug_input_channel_id,        // read messages here
- *   bug_board_channel_id,        // post board here
- *   bug_board_message_id,        // the message we edit
- *   bug_updates_channel_id       // optional: status announcements
- * }>
- *
- * users: Map<`${guildId}:${userId}`, { xp, level, balance, lastDailyMs }>
- * tickets: Map<channelId, { guildId, ownerId, status, createdAtMs, closedAtMs, closedById }>
- * vouches: Map<guildId, Array<{ voucherId, vouchedId, message, createdAtMs }>>
- *
- * bugs: Map<guildId, { counter: number, items: Map<number, BugItem> }>
- * BugItem: {
- *   id, reporterId, title, description,
- *   status, createdAtMs, updatedAtMs,
- *   sourceChannelId, sourceMessageId, sourceMessageUrl,
- *   assignedToId, lastNote
- * }
- */
 const guildSettings = new Map();
 const users = new Map();
 const tickets = new Map();
@@ -123,6 +100,13 @@ async function safeEdit(interaction, payload) {
     return await interaction.editReply(payload);
   } catch {
     return null;
+  }
+}
+function hasManageGuild(interaction) {
+  try {
+    return Boolean(interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild));
+  } catch {
+    return false;
   }
 }
 
@@ -438,7 +422,7 @@ function getBug(guildId, id) {
   const store = getBugStore(guildId);
   return store.items.get(Number(id)) || null;
 }
-function setBugStatus(guildId, id, status, changedById, assignId, note) {
+function setBugStatus(guildId, id, status, assignId, note) {
   const bug = getBug(guildId, id);
   if (!bug) return null;
 
@@ -481,7 +465,7 @@ function buildBugBoardEmbed(guildId) {
   const open = all.filter((b) => b.status !== "RESOLVED");
   const resolved = all.filter((b) => b.status === "RESOLVED");
 
-  const show = all.slice(0, 15); // show last 15
+  const show = all.slice(0, 15);
   const lines = show.length ? show.map(buildBugCardLine) : ["No bugs reported yet."];
 
   return new EmbedBuilder()
@@ -506,13 +490,11 @@ async function ensureBugBoardMessage(guild) {
   const ch = await guild.channels.fetch(s.bug_board_channel_id).catch(() => null);
   if (!ch || !ch.isTextBased()) return null;
 
-  // If we have a stored message id, try to fetch it
   if (s.bug_board_message_id) {
     const msg = await ch.messages.fetch(s.bug_board_message_id).catch(() => null);
     if (msg) return msg;
   }
 
-  // Create a new board message
   const created = await ch.send({ embeds: [buildBugBoardEmbed(guild.id)] }).catch(() => null);
   if (!created) return null;
 
@@ -560,17 +542,14 @@ async function announceBugStatus(guild, bug, changedById) {
     .catch(() => null);
 }
 
-// Parse bug from a message in bug input channel
 function bugFromMessage(guildId, message) {
   const content = String(message.content || "").trim();
   const attachments = [...message.attachments.values()].map((a) => a.url).slice(0, 5);
 
-  // If Message Content intent is off, content may be empty for non-commands.
   const titleFromContent = content ? content.split("\n")[0].slice(0, 100) : "Bug report";
   const descFromContent = content ? content.slice(0, 900) : "(Enable Message Content Intent to capture text.)";
 
   const extra = attachments.length ? `\n\nAttachments:\n${attachments.map((u) => `• ${u}`).join("\n")}` : "";
-
   return {
     title: titleFromContent,
     description: `${descFromContent}${extra}`,
@@ -641,7 +620,6 @@ function createClient(intents) {
   });
 }
 
-// We'll create the client later, after registering commands.
 let client = null;
 
 // ---------------------------
@@ -717,10 +695,12 @@ const commands = [
     .setDescription("Check vouches for a user (PUBLIC).")
     .addUserOption((o) => o.setName("user").setDescription("User (optional)").setRequired(false)),
 
+  // IMPORTANT: no setDefaultMemberPermissions on subcommands (Discord limitation).
+  // We'll enforce permissions at runtime for /bug board and /bug status.
   new SlashCommandBuilder()
     .setName("bug")
     .setDescription("Bug tools.")
-    .addSubcommand((s) => s.setName("board").setDescription("Force refresh the bug board (admin).").setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild))
+    .addSubcommand((s) => s.setName("board").setDescription("Force refresh the bug board. (Manage Server required)"))
     .addSubcommand((s) =>
       s
         .setName("view")
@@ -731,12 +711,9 @@ const commands = [
     .addSubcommand((s) =>
       s
         .setName("status")
-        .setDescription("Update bug status (staff).")
-        .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+        .setDescription("Update bug status. (Manage Server required)")
         .addIntegerOption((o) => o.setName("id").setDescription("Bug ID").setRequired(true).setMinValue(1))
-        .addStringOption((o) =>
-          o.setName("status").setDescription("New status").setRequired(true).addChoices(...bugStatusChoices)
-        )
+        .addStringOption((o) => o.setName("status").setDescription("New status").setRequired(true).addChoices(...bugStatusChoices))
         .addUserOption((o) => o.setName("assign").setDescription("Assign to (optional)").setRequired(false))
         .addStringOption((o) => o.setName("note").setDescription("Note (optional)").setRequired(false))
     ),
@@ -765,9 +742,7 @@ const commands = [
     .setName("purge")
     .setDescription("Bulk delete messages (1-100).")
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
-    .addIntegerOption((o) =>
-      o.setName("amount").setDescription("Amount").setRequired(true).setMinValue(1).setMaxValue(100)
-    ),
+    .addIntegerOption((o) => o.setName("amount").setDescription("Amount").setRequired(true).setMinValue(1).setMaxValue(100)),
 ].map((c) => c.toJSON());
 
 async function registerCommands() {
@@ -784,7 +759,7 @@ async function registerCommands() {
 }
 
 // ---------------------------
-// Attach event handlers to a client instance
+// Attach events
 // ---------------------------
 function wireClientEvents(c) {
   c.once("ready", async () => {
@@ -792,7 +767,6 @@ function wireClientEvents(c) {
     console.log(`[DISCORD] Runtime intents: GuildMembers=${ENABLE_GUILD_MEMBERS_INTENT}, MessageContent=${ENABLE_MESSAGE_CONTENT_INTENT}`);
   });
 
-  // Welcome (needs GuildMembers intent)
   c.on("guildMemberAdd", async (member) => {
     try {
       const s = getSettings(member.guild.id);
@@ -806,24 +780,15 @@ function wireClientEvents(c) {
         .replaceAll("{guild}", member.guild.name);
 
       await ch.send({ content: rendered, allowedMentions: { users: [member.id] } }).catch(() => null);
-
-      await sendLog(
-        member.guild,
-        new EmbedBuilder()
-          .setTitle("👋 Member Joined")
-          .setDescription(`<@${member.id}> (${member.user.tag})`)
-          .setTimestamp(new Date())
-      );
     } catch {}
   });
 
-  // XP + Bug channel reader
   c.on("messageCreate", async (message) => {
     try {
       if (!message.guild) return;
       if (message.author?.bot) return;
 
-      // XP (works even if message content is not available)
+      // XP
       if (canEarnXp(message.guild.id, message.author.id)) {
         const gain = 15 + Math.floor(Math.random() * 11);
         const res = addXp(message.guild.id, message.author.id, gain);
@@ -840,61 +805,31 @@ function wireClientEvents(c) {
               allowedMentions: { users: [message.author.id] },
             })
             .catch(() => null);
-
-          await sendLog(
-            message.guild,
-            new EmbedBuilder()
-              .setTitle("📈 Level Up")
-              .setDescription(`<@${message.author.id}> → **Level ${res.level}**`)
-              .setTimestamp(new Date())
-          );
         }
       }
 
-      // Bug input channel reader
+      // Bug reader
       const s = getSettings(message.guild.id);
       if (!s.bug_input_channel_id) return;
       if (message.channel.id !== s.bug_input_channel_id) return;
 
-      // Ignore commands/empty? We'll still accept, but avoid saving obvious slash-like lines.
       const parsed = bugFromMessage(message.guild.id, message);
-      const bug = createBug(
-        message.guild.id,
-        message.author.id,
-        parsed.title,
-        parsed.description,
-        parsed.sourceChannelId,
-        parsed.sourceMessageId
-      );
+      const bug = createBug(message.guild.id, message.author.id, parsed.title, parsed.description, parsed.sourceChannelId, parsed.sourceMessageId);
 
-      // Acknowledge (reply + react)
+      message.react("✅").catch(() => null);
+
       const ackText =
         `✅ Saved as **Bug #${bug.id}** — staff will review it.\n` +
         (ENABLE_MESSAGE_CONTENT_INTENT ? "" : "⚠️ Tip: enable Message Content Intent to save full text.");
 
-      // Try reaction first
-      message.react("✅").catch(() => null);
+      await message.reply({ content: ackText, allowedMentions: { users: [message.author.id] } }).catch(() => null);
 
-      // Reply (auto-delete after 15s to keep channel clean)
-      const ackMsg = await message.reply({ content: ackText, allowedMentions: { users: [message.author.id] } }).catch(() => null);
-      if (ackMsg) setTimeout(() => ackMsg.delete().catch(() => null), 15_000);
-
-      // Refresh board
       await refreshBugBoard(message.guild).catch(() => null);
-
-      await sendLog(
-        message.guild,
-        new EmbedBuilder()
-          .setTitle("🐞 Bug Saved")
-          .setDescription(`Bug **#${bug.id}** saved from <@${message.author.id}> in <#${message.channel.id}>`)
-          .setTimestamp(new Date())
-      );
     } catch (e) {
       console.error("[BUG-READER ERROR]", e);
     }
   });
 
-  // Buttons + Modals + Slash commands
   c.on("interactionCreate", async (interaction) => {
     // Buttons
     if (interaction.isButton()) {
@@ -939,10 +874,7 @@ function wireClientEvents(c) {
       if (interaction.customId === PANEL_BUG_BOARD) {
         const s = getSettings(guild.id);
         if (!s.bug_board_channel_id) {
-          return safeReply(interaction, {
-            content: "Bug board is not configured. Ask an admin to run `/setbugchannels`.",
-            ephemeral: true,
-          });
+          return safeReply(interaction, { content: "Bug board is not configured. Ask an admin to run `/setbugchannels`.", ephemeral: true });
         }
         const link = `https://discord.com/channels/${guild.id}/${s.bug_board_channel_id}`;
         return safeReply(interaction, { content: `📋 Bug Board: ${link}`, ephemeral: true });
@@ -978,22 +910,17 @@ function wireClientEvents(c) {
       if (interaction.customId === MODAL_BUG_REPORT) {
         const s = getSettings(guild.id);
         if (!s.bug_input_channel_id) {
-          return safeReply(interaction, {
-            content: "Bug channels are not configured. Ask an admin to run `/setbugchannels`.",
-            ephemeral: true,
-          });
+          return safeReply(interaction, { content: "Bug channels are not configured. Ask an admin to run `/setbugchannels`.", ephemeral: true });
         }
 
         const title = interaction.fields.getTextInputValue("title");
         const description = interaction.fields.getTextInputValue("description");
 
-        // We will post a message into the bug input channel so the bug has a clickable source link.
         const bugChannel = await guild.channels.fetch(s.bug_input_channel_id).catch(() => null);
         if (!bugChannel || !bugChannel.isTextBased()) {
           return safeReply(interaction, { content: "Bug input channel is invalid.", ephemeral: true });
         }
 
-        // Post the report message (source)
         const posted = await bugChannel
           .send({
             embeds: [
@@ -1019,28 +946,15 @@ function wireClientEvents(c) {
           return safeReply(interaction, { content: "I couldn't post your bug (missing permissions?).", ephemeral: true });
         }
 
-        const bug = createBug(
-          guild.id,
-          interaction.user.id,
-          title,
-          description,
-          posted.channel.id,
-          posted.id
-        );
+        const bug = createBug(guild.id, interaction.user.id, title, description, posted.channel.id, posted.id);
 
-        // Acknowledge
-        await safeReply(interaction, {
-          content: `✅ Saved as **Bug #${bug.id}**: ${bug.sourceMessageUrl}`,
-          ephemeral: true,
-        });
-
-        // Refresh board
+        await safeReply(interaction, { content: `✅ Saved as **Bug #${bug.id}**: ${bug.sourceMessageUrl}`, ephemeral: true });
         await refreshBugBoard(guild).catch(() => null);
         return;
       }
     }
 
-    // Slash commands
+    // Slash
     if (!interaction.isChatInputCommand()) return;
     const guild = interaction.guild;
     if (!guild) return safeReply(interaction, { content: "This bot only works inside servers.", ephemeral: true });
@@ -1083,8 +997,7 @@ function wireClientEvents(c) {
         if (!channel.isTextBased()) return safeReply(interaction, { content: "That channel is not text-based.", ephemeral: true });
 
         setSettings(guild.id, { welcome_channel_id: channel.id, welcome_message: message });
-        await safeReply(interaction, { content: `✅ Welcome configured in ${channel}.`, ephemeral: true });
-        return;
+        return safeReply(interaction, { content: `✅ Welcome configured in ${channel}.`, ephemeral: true });
       }
 
       if (interaction.commandName === "setlog") {
@@ -1092,8 +1005,7 @@ function wireClientEvents(c) {
         if (!channel.isTextBased()) return safeReply(interaction, { content: "That channel is not text-based.", ephemeral: true });
 
         setSettings(guild.id, { log_channel_id: channel.id });
-        await safeReply(interaction, { content: `✅ Logs configured in ${channel}.`, ephemeral: true });
-        return;
+        return safeReply(interaction, { content: `✅ Logs configured in ${channel}.`, ephemeral: true });
       }
 
       if (interaction.commandName === "setbugchannels") {
@@ -1109,7 +1021,7 @@ function wireClientEvents(c) {
           bug_input_channel_id: input.id,
           bug_board_channel_id: board.id,
           bug_updates_channel_id: updates ? updates.id : null,
-          bug_board_message_id: null, // reset so we recreate
+          bug_board_message_id: null,
         });
 
         await safeReply(interaction, {
@@ -1117,7 +1029,6 @@ function wireClientEvents(c) {
           ephemeral: true,
         });
 
-        // Create / refresh board right away
         await refreshBugBoard(guild).catch(() => null);
         return;
       }
@@ -1128,9 +1039,7 @@ function wireClientEvents(c) {
 
         const embed = new EmbedBuilder()
           .setTitle("🏅 Rank")
-          .setDescription(
-            [`**User:** <@${target.id}>`, `**Level:** ${u.level}`, `**XP:** ${u.xp} / ${xpForNext(u.level)}`, "", "_Resets on restart._"].join("\n")
-          )
+          .setDescription([`**User:** <@${target.id}>`, `**Level:** ${u.level}`, `**XP:** ${u.xp} / ${xpForNext(u.level)}`, "", "_Resets on restart._"].join("\n"))
           .setTimestamp(new Date());
 
         return safeReply(interaction, { embeds: [embed], ephemeral: true });
@@ -1192,8 +1101,7 @@ function wireClientEvents(c) {
           throw e;
         }
 
-        await safeReply(interaction, { content: `✅ Sent **${amount}** coins to <@${to.id}>.`, ephemeral: true });
-        return;
+        return safeReply(interaction, { content: `✅ Sent **${amount}** coins to <@${to.id}>.`, ephemeral: true });
       }
 
       if (interaction.commandName === "ticket") {
@@ -1217,7 +1125,6 @@ function wireClientEvents(c) {
         }
       }
 
-      // VOUCH (PUBLIC)
       if (interaction.commandName === "vouch") {
         const target = interaction.options.getUser("user", true);
         const msg = interaction.options.getString("message") || "";
@@ -1244,7 +1151,6 @@ function wireClientEvents(c) {
         return safeReply(interaction, { embeds: [embed], allowedMentions: { users: [interaction.user.id, target.id] } });
       }
 
-      // CHECKVOUCH (PUBLIC)
       if (interaction.commandName === "checkvouch") {
         const target = interaction.options.getUser("user") || interaction.user;
         const stats = getVouchStats(guild.id, target.id);
@@ -1274,11 +1180,13 @@ function wireClientEvents(c) {
         return safeReply(interaction, { embeds: [embed], allowedMentions: { users: [target.id] } });
       }
 
-      // BUG
       if (interaction.commandName === "bug") {
         const sub = interaction.options.getSubcommand(true);
 
         if (sub === "board") {
+          if (!hasManageGuild(interaction)) {
+            return safeReply(interaction, { content: "❌ You need **Manage Server** to use this.", ephemeral: true });
+          }
           await refreshBugBoard(guild).catch(() => null);
           return safeReply(interaction, { content: "✅ Bug board refreshed.", ephemeral: true });
         }
@@ -1318,6 +1226,10 @@ function wireClientEvents(c) {
         }
 
         if (sub === "status") {
+          if (!hasManageGuild(interaction)) {
+            return safeReply(interaction, { content: "❌ You need **Manage Server** to use this.", ephemeral: true });
+          }
+
           const id = interaction.options.getInteger("id", true);
           const status = interaction.options.getString("status", true);
           const assign = interaction.options.getUser("assign", false);
@@ -1325,7 +1237,7 @@ function wireClientEvents(c) {
 
           if (!BUG_STATUSES.includes(status)) return safeReply(interaction, { content: "Invalid status.", ephemeral: true });
 
-          const updated = setBugStatus(guild.id, id, status, interaction.user.id, assign ? assign.id : undefined, note);
+          const updated = setBugStatus(guild.id, id, status, assign ? assign.id : undefined, note);
           if (!updated) return safeReply(interaction, { content: `Bug #${id} not found.`, ephemeral: true });
 
           await announceBugStatus(guild, updated, interaction.user.id).catch(() => null);
@@ -1335,44 +1247,30 @@ function wireClientEvents(c) {
         }
       }
 
-      // PANEL
       if (interaction.commandName === "panel") {
         const sub = interaction.options.getSubcommand(true);
         if (sub === "create") {
           await safeReply(interaction, { content: "✅ Panel posted.", ephemeral: true });
-          await interaction.channel
-            .send({ embeds: [buildSupportPanelEmbed()], components: buildSupportPanelComponents() })
-            .catch(() => null);
+          await interaction.channel.send({ embeds: [buildSupportPanelEmbed()], components: buildSupportPanelComponents() }).catch(() => null);
           return;
         }
       }
 
-      // Moderation
       if (interaction.commandName === "kick") {
         const target = interaction.options.getUser("user", true);
         const reason = interaction.options.getString("reason") || "No reason provided.";
-
         const member = await guild.members.fetch(target.id).catch(() => null);
         if (!member) return safeReply(interaction, { content: "Member not found.", ephemeral: true });
 
-        await member.kick(reason).catch((e) => {
-          throw new Error(`Kick failed: ${e?.message || e}`);
-        });
-
-        await safeReply(interaction, { content: `✅ Kicked <@${target.id}>.`, ephemeral: true });
-        return;
+        await member.kick(reason).catch((e) => { throw new Error(`Kick failed: ${e?.message || e}`); });
+        return safeReply(interaction, { content: `✅ Kicked <@${target.id}>.`, ephemeral: true });
       }
 
       if (interaction.commandName === "ban") {
         const target = interaction.options.getUser("user", true);
         const reason = interaction.options.getString("reason") || "No reason provided.";
-
-        await guild.members.ban(target.id, { reason }).catch((e) => {
-          throw new Error(`Ban failed: ${e?.message || e}`);
-        });
-
-        await safeReply(interaction, { content: `✅ Banned <@${target.id}>.`, ephemeral: true });
-        return;
+        await guild.members.ban(target.id, { reason }).catch((e) => { throw new Error(`Ban failed: ${e?.message || e}`); });
+        return safeReply(interaction, { content: `✅ Banned <@${target.id}>.`, ephemeral: true });
       }
 
       if (interaction.commandName === "purge") {
@@ -1382,9 +1280,7 @@ function wireClientEvents(c) {
 
         const deleted = await channel.bulkDelete(amount, true).catch(() => null);
         const count = deleted ? deleted.size : 0;
-
-        await safeReply(interaction, { content: `✅ Deleted ${count} messages.`, ephemeral: true });
-        return;
+        return safeReply(interaction, { content: `✅ Deleted ${count} messages.`, ephemeral: true });
       }
 
       return safeReply(interaction, { content: "Command not handled.", ephemeral: true });
@@ -1418,12 +1314,9 @@ async function main() {
     const msg = String(e?.message || e || "");
     console.error("[LOGIN ERROR]", msg);
 
-    // Auto fallback if discord rejects privileged intents
     if (msg.toLowerCase().includes("disallowed intents") && (preferred.guildMembers || preferred.messageContent)) {
-      console.warn("[WARN] Discord rejected privileged intents. Falling back to safe intents (no GuildMembers/MessageContent).");
-      try {
-        client?.destroy?.();
-      } catch {}
+      console.warn("[WARN] Discord rejected privileged intents. Falling back to safe intents.");
+      try { client?.destroy?.(); } catch {}
       client = await startWithIntents({ guildMembers: false, messageContent: false });
       console.log("[START] Bot started (fallback mode)");
       return;
